@@ -1,5 +1,5 @@
 import sys 
-sys.path.append("/home/sig/Data-Pipeline/Code/Streamlit/")
+sys.path.append("/home/ubuntu/Stock_Dashboard/Streamlit/")
 import transform_index
 import db_info
 import pandas as pd
@@ -10,7 +10,25 @@ import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+import boto3
+import os
+from io import StringIO
 
+
+# AWS
+access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id=access_key,
+    aws_secret_access_key=secret_key
+)
+
+s3_bucket_name = "stock-data-warehouse"
+s3_object_key = "Index-Data/"
+
+parent_dir = "/home/ubuntu/index_data"
 
 # 오늘 날짜 갱신
 now = datetime.now()
@@ -24,7 +42,6 @@ origin_index_list = transform_index.index_list
 new_index_list = transform_index.transform_special_char(
     transform_index.index_list)
 
-parent_dir = "/mnt/c/Pipeline/pipe/Index_Data"
 
 # db 정보
 db_config = {
@@ -87,7 +104,7 @@ def store_index_data(today_date, index_name: list, db_cursor, db_conn):
 
         folder_path = f"{parent_dir}/{index_name[i]}"
 
-        # 주요 국가의 Index 중 S&P만 특수문자를 표시하고 있어 하나를 처리하기 위해 함수를 만드는 것은 비효율적이라 생각하여 작접 값을 입력함 
+        # 주요 국가의 Index 중 S&P만 특수문자를 표시하고 있어 처리하기 위해 함수를 만드는 것은 비효율적이라 작접 값 입력
         if index_name[i] == "S&P500":
             dataframe_name = "SP500_df.csv"
         else:
@@ -98,19 +115,27 @@ def store_index_data(today_date, index_name: list, db_cursor, db_conn):
 
         dataframe = fdr.DataReader(index_name[i], "2000-01-01", today_date)
         reset_dataframe = dataframe.reset_index()
-        
+
         # 백업용으로 Local에 저장
-        reset_dataframe.to_csv(f"{folder_path}/{dataframe_name}", encoding = "utf-8", index = False)
-        
+        reset_dataframe.to_csv(f"{folder_path}/{dataframe_name}",
+                               encoding="utf-8",
+                               index=False)
+
         # Insert Database
         insert_index_data(dataframe_name, reset_dataframe, db_cursor, db_conn)
+
+        # Upload_S3
+        csv_buffer = StringIO()
+        reset_dataframe.to_csv(csv_buffer)
+        s3_client.put_object(Body=csv_buffer.getvalue(), Bucket=s3_bucket_name,
+                             Key=s3_object_key+f"{dataframe_name}")
 
 
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
     # UTC 기준으로 한국 시간 08:30 (UTC 23:30)에 실행하도록 설정
-    'start_date': datetime(2024, 1, 2, 23, 30),  
+    'start_date': datetime(2024, 1, 2, 23, 30),
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 1,
@@ -129,7 +154,8 @@ dag = DAG(
 store_index_data_task = PythonOperator(
     task_id='store_index_data',
     python_callable=store_index_data,  # 호출할 함수
-    op_kwargs={'today_date': today_date_str, 'index_name': origin_index_list, 'db_cursor': cur, 'db_conn': conn},
+    op_kwargs={'today_date': today_date_str, 'index_name': origin_index_list,
+               'db_cursor': cur, 'db_conn': conn},
     dag=dag,
 )
 # 태스크 의존성 설정
